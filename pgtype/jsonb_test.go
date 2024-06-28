@@ -37,6 +37,58 @@ func TestJSONBTranscode(t *testing.T) {
 	})
 }
 
+func TestJSONBFunctionCallWithStruct(t *testing.T) {
+	defaultConnTestRunner.RunTest(context.Background(), t, func(ctx context.Context, t testing.TB, conn *pgx.Conn) {
+		type barStruct struct {
+			Foo string `json:"foo"`
+			Bar int    `json:"bar"`
+		}
+
+		_, err := conn.Exec(ctx, `
+DROP FUNCTION IF EXISTS get_bar(details jsonb);
+CREATE OR REPLACE FUNCTION get_bar(details jsonb) RETURNS TEXT LANGUAGE SQL AS $$
+    SELECT details->>'bar';
+$$;
+`)
+		require.NoError(t, err)
+		defer conn.Exec(ctx, `DROP FUNCTION IF EXISTS get_bar(details jsonb)`)
+		var actual string
+		err = conn.QueryRow(ctx, "select get_bar($1)", barStruct{Foo: "f", Bar: 99}).Scan(&actual)
+		require.NoError(t, err)
+		require.Equal(t, actual, "99")
+	})
+}
+
+func TestJSONBFunctionCallWithMap(t *testing.T) {
+	skipCockroachDB(t, "CockroachDB does not support this DOMAIN syntax.")
+	defaultConnTestRunner.RunTest(context.Background(), t, func(ctx context.Context, t testing.TB, conn *pgx.Conn) {
+		m := map[string]any{"foo": "f", "bar": 99}
+		_, err := conn.Exec(ctx, `
+DROP SCHEMA IF EXISTS fn CASCADE;
+DROP SCHEMA IF EXISTS data CASCADE;
+CREATE SCHEMA data ;
+CREATE SCHEMA fn ;
+CREATE DOMAIN data.jsonb_not_null AS jsonb NOT NULL;
+CREATE OR REPLACE FUNCTION fn.get_bar(details data.jsonb_not_null) RETURNS TEXT LANGUAGE SQL AS $$
+    SELECT details->>'bar';
+$$;
+`)
+		require.NoError(t, err)
+
+		_, err = conn.LoadTypes(ctx, []string{"data.jsonb_not_null"})
+		// types, err = conn.LoadTypes(ctx, []string{"data.jsonb_not_null"})
+		// conn.TypeMap().RegisterTypes(types)
+		// require.NoError(t, err)
+
+		defer conn.Exec(ctx, `DROP SCHEMA fn CASCADE`)
+		defer conn.Exec(ctx, `DROP SCHEMA data CASCADE`)
+		var actual string
+		err = conn.QueryRow(ctx, "select fn.get_bar($1::data.jsonb_not_null)", pgx.QueryResultFormats{pgx.BinaryFormatCode}, m).Scan(&actual)
+		require.NoError(t, err)
+		require.Equal(t, actual, "99")
+	})
+}
+
 func TestJSONBCodecUnmarshalSQLNull(t *testing.T) {
 	defaultConnTestRunner.RunTest(context.Background(), t, func(ctx context.Context, t testing.TB, conn *pgx.Conn) {
 		// Slices are nilified
@@ -95,7 +147,8 @@ func TestJSONBCodecCustomMarshal(t *testing.T) {
 				Unmarshal: func(data []byte, v any) error {
 					return json.Unmarshal([]byte(`{"custom":"value"}`), v)
 				},
-			}})
+			},
+		})
 	}
 
 	pgxtest.RunValueRoundTripTests(context.Background(), t, connTestRunner, pgxtest.KnownOIDQueryExecModes, "jsonb", []pgxtest.ValueRoundTripTest{
